@@ -1,42 +1,88 @@
 # libpipe
 
-Server pipeline for RoomCapture sessions (steps 2-14 of the diagram). Cloud-API based: no GPU needed.
+Server pipeline for RoomCapture sessions (steps 2-14 of the diagram). Cloud-API based (Fable/Claude,
+Astra/GPT, Jev/TypeSafe, SAM2 via Replicate) — no GPU needed, except the trained spine detector, which
+runs locally via Ultralytics/PyTorch (CPU is fine for inference; training needed a GPU, see below).
 
 **Every accuracy number in this codebase's docstrings is the source diagram's *target*, not something this
 code has achieved.** They're marked `SOURCE DIAGRAM TARGET, not measured by this code` at the point they're
-quoted. Where a real (non-synthetic) test run exists, that file also says what was actually observed, and
-it has so far always been worse than the target. See `results/README.md` for the real runs and their
-known bugs (some fixed, some open).
+quoted. Where a real (non-synthetic) test run exists, that file also says what was actually observed. See
+`results/README.md` for the real runs and their known bugs (some fixed, some open).
 
-    pip install -e .[dev]          # numpy scipy pillow httpx fastapi uvicorn anthropic openai zxing-cpp pyliblzfse
-    cp .env.example .env           # fill keys
-    libpipe serve                  # step 2: PUT /upload  (point Uploader.uploadURLString at it)
-    libpipe process data/sessions/<session_folder>
-    libpipe hitl                   # open review items
-    libpipe gold                   # weekly gold-set check (pauses learning on drift)
+## Install
 
-No real RoomCapture session exists yet, so `scripts/run_demo.py` runs the real pipeline (real Fable/Astra/
-Jev, real web-search pricing) against LiDAR scans imported from other apps, for testing the geometry and
-judged-pair logic end to end. Importers: `stray.py` (Stray Scanner) and `r3d.py` (Record3D, needs
-`pyliblzfse`) — both verify the imported camera poses empirically (adjacent-frame depth clouds must line up)
-because each app uses a different pose convention and getting it wrong silently corrupts every 3D box.
+    pip install -e .[dev]          # add .[dev,r3d] instead if you need the Record3D importer too
+    cp .env.example .env           # fill in keys - see Configuration below
 
-    PYTHONPATH=src python scripts/run_demo.py data/sessions/<imported_session> --segmenter sam2 --every 8
+## Configuration (`.env`)
+
+| Key | Required for | Notes |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Fable (step 8/9 judge) | |
+| `OPENAI_API_KEY` | Astra (step 8/9 judge) | separate billing/credits from Anthropic |
+| `TYPESAFE_API_KEY` | Jev (step 9 arbiter) | |
+| `REPLICATE_API_TOKEN` | SAM2 (step 6, `--segmenter sam2`) | |
+| `ISBNDB_API_KEY` | book identity (step 10) | |
+| `SERPAPI_API_KEY` | Google Shopping (books) + Google Lens (non-books) pricing | |
+| `KEEPA_API_KEY` | book pricing, preferred over Shopping | optional, paid plan |
+| `IMAGE_BASE_URL` | routes non-book pricing to Google Lens instead of Astra web-search | see "Real upload setup" below - **set this**, it avoids burning OpenAI credits on pricing |
+| `ASSET_REGISTER` | offline CSV fallback (`description,price,currency`) if Lens/web-search find nothing | optional |
+| `LIBPIPE_DATA` | where sessions/db/output live | defaults to `./data` |
+| `UPLOAD_TOKEN` | shared secret the app's Settings screen must match | optional |
+
+## Real workflow: phone → server → reviewed inventory
+
+1. **Start the server**: `libpipe serve` (or `uvicorn libpipe.server:app --host 0.0.0.0 --port 8000`)
+2. **Expose it publicly** so the phone can reach it: `cloudflared tunnel --url http://localhost:8000`
+   (or ngrok, or a real domain). Free tunnel URLs change on every restart.
+3. **Point the app at it**: in the RoomCapture app, gear icon → Settings → paste `<tunnel-url>/upload`.
+   Tap Test Connection first.
+4. **Set `IMAGE_BASE_URL`** in `.env` to `<tunnel-url>/img` (the server already serves saved crops there via
+   `StaticFiles`) — this routes non-book pricing through Google Lens instead of Astra's web-search
+   workaround, which otherwise doubles your OpenAI spend (region judging *and* pricing on the same
+   account). Restart the server after changing `.env`.
+5. **Record and upload** a session from the app. It lands in `data/sessions/<session_id>/`, status
+   `uploaded` in the DB.
+6. **Process it**: `libpipe process data/sessions/<session_id>`
+7. **Review**: `libpipe hitl` (JSON dump) or the actual reviewable page at `GET /hitl` on the same server/
+   tunnel — crops, one-tap candidate pick, manual correction, and a "remove object entirely" option for
+   duplicates (see "Known gaps").
+
+`scripts/run_demo.py` is the equivalent for testing/demoing against an already-imported or already-uploaded
+session folder, with more flags than the bare `libpipe process` currently exposes:
+
+    PYTHONPATH=src python scripts/run_demo.py data/sessions/<session_id> \
+        --segmenter sam2 --spine --every 10 --rotate 90 --out results/<name> [--resume]
+
+- `--spine` — also run the trained spine detector (`pieces.SpineDetector`) alongside SAM2/OpenCV
+- `--rotate 90|180|270` — clockwise correction applied to crops shown to Fable/Astra and saved for review;
+  needed for this project's own RoomCapture app, which saves frames/stills in raw sensor orientation
+  regardless of how the phone was held (confirmed on a real upload - see "Bugs found and fixed"). 3D
+  geometry is unaffected either way; only what a human/vision-model actually looks at needs this.
+- `--resume` — skip regions (and the SAM2/spine-detector pass itself) already completed in a prior,
+  interrupted attempt at the same `--out` path, instead of re-paying for them. **Not yet on the production
+  `libpipe process` command** - only `run_demo.py`, see "Known gaps".
+- `--regions N` — cap how many *found* regions get sent to the models (cost control); 0 (default) = all.
+
+Importers for LiDAR scans captured by *other* apps (useful before you have a real RoomCapture upload, or
+for comparison): `stray.py` (Stray Scanner) and `r3d.py` (Record3D, needs the `r3d` extra) — both verify
+imported camera poses empirically (adjacent-frame depth clouds must line up), because each app uses a
+different pose convention and getting it wrong silently corrupts every 3D box.
 
 | Step | Module | Status |
 |---|---|---|
-| 2 upload | `server.py` | written, **untested** (needs fastapi) |
-| 3 prep | `prep.py`, `llm.transcribe` | align run on 2 real scans; Whisper run once on real (near-silent) audio - hallucinated |
-| 4 stitch | `stitch.py` | written, **untested on real data** (needs two overlapping sessions; unit-tested on synthetic clouds) |
-| 5 floor plan | `floorplan.py` | run on 2 real scans; against a hand-measured room only 1 of 3 dimensions was within the 10cm target (see `results/README.md`). **doors/windows not available** (app saves no ARKit mesh classification) |
-| 6 find pieces | `pieces.py` | geometry/merge/spine-split unit-tested on synthetic data; run on 2 real scans with real SAM2 and the free OpenCV fallback - **never run on an actual bookshelf**, so spine separation is completely unmeasured |
-| 7 regions | `regions.py` | run on 2 real scans; region *content* was previously wrong (see "Bugs found and fixed") |
-| 8 region call | `regions.py`, `llm.py` | run on 2 real scans with real Fable + Astra |
-| 9 settle | `settle.py` | unit-tested (16 cases incl. shift-fix, order-flip = tie, reshare, HITL routing) + run on 2 real scans |
-| 10 identity | `identity.py` | unit-tested against mocked ISBNdb; **never run against a real book** |
-| 11 price | `pricing.py` | unit-tested against mocked Keepa/SerpApi/FX; run on real non-book objects via web search (see `results/README.md`); book path (Keepa/Shopping) never run for real |
-| 12-13 HITL, learning, gold | `hitl.py`, `hitl_ui.py`, `learning.py` | unit-tested; reviewable UI live at `GET /hitl` (crops, one-tap candidate pick, manual correction form); resolving an identity edit now re-runs pricing automatically unless the reviewer typed a price by hand |
-| 14 output | `output.py` | run end to end on 2 real scans |
+| 2 upload | `server.py` | working - real uploads received from the actual iOS app |
+| 3 prep | `prep.py`, `llm.transcribe` | run on real sessions incl. real audio transcription |
+| 4 stitch | `stitch.py` | **still untested on real data** (needs two overlapping real room sessions; unit-tested on synthetic clouds) |
+| 5 floor plan | `floorplan.py` | run on real scans; a duplicate-wall bug was found and fixed (see below). Dimension accuracy still unverified against a real hand-measured room since that fix. **doors/windows not available** (app saves no ARKit mesh classification) |
+| 6 find pieces | `pieces.py` | run on real scans with real SAM2 + the trained spine detector; furniture-scale objects (a bed, a wall-mounted TV) now correctly detected after a real bug fix (see below) |
+| 7 regions | `regions.py` | run on real scans |
+| 8 region call | `regions.py`, `llm.py` | run on real scans with real Fable + Astra, incl. real book spines |
+| 9 settle | `settle.py` | unit-tested (16+ cases incl. shift-fix, order-flip = tie, reshare, HITL routing) + run on real scans |
+| 10 identity | `identity.py` | **run against real books for the first time**: 2 of 4 real spine detections resolved a real ISBN via ISBNdb |
+| 11 price | `pricing.py` | run on real objects, books and non-books; one real book successfully priced via Google Shopping |
+| 12-13 HITL, learning, gold | `hitl.py`, `hitl_ui.py`, `learning.py` | reviewable UI live at `GET /hitl` - crops, one-tap candidate pick, manual correction, "not a real object" override, and "remove object entirely" (for duplicates); identity edits auto-reprice; gold-set drift check (`libpipe gold`) still never actually run |
+| 14 output | `output.py` | run end to end on real scans |
 
 ## Bugs found and fixed (real runs, not unit tests)
 - **Stray Scanner poses were the wrong convention** (OpenCV, not ARKit): every 3D box was built from
@@ -45,67 +91,80 @@ because each app uses a different pose convention and getting it wrong silently 
   (poses there were already correct) and additionally checked the recovered room size against a hand-measured
   room to pick the right axis mapping.
 - **The region overview/box-preview image picked the wrong photo.** It scored a still by how many piece
-  *centers* fell inside frame, with no check on size or occlusion, so a still where every piece was a sliver
-  at the edge scored the same as one framing them well. This is almost certainly why region content looked
-  "outside the region" in early runs: the labelled overview and the box-preview images (and therefore the
-  visual evidence Fable/Astra actually saw) didn't reliably show the pieces they were meant to. Fixed by
-  `regions.best_group_still`, which requires most of each piece's projected box to be visible, not just its
-  centre; both the overview image and the pieces-preview image now use it.
-- **Adjacency between pieces was under-signalled.** The only proximity hint in the prompt was `overlaps`,
-  which needs true 3D-box intersection and almost never fires between distinct nearby objects (most real
-  clutter sits next to, not inside, its neighbour). Added a `near (not overlapping)` hint (within 20cm) so
-  Fable/Astra can reason about adjacency; the system prompt now explains the difference and explicitly says
-  not to report gaps or objects outside the given crops (true "unclaimed space" detection - a shelf-plane
-  estimate - is still not implemented at all; see below).
-- **`lift_mask` silently dropped most real objects, not just noise.** On a real cluttered-room frame, SAM2
-  itself found 14 candidate masks and our own area filter correctly kept 10 of them - but only 4 of those 10
-  survived depth-lifting into a 3D piece, because `lift_mask` required ARKit confidence `==2` ("high" only,
-  discarding "medium") and >=30 confident points. This wasn't a segmentation problem at all: it silently threw
-  away correctly-segmented masks for small, distant, or dark objects (a teddy bear, a spray can, several small
-  bottles) purely on a depth-confidence technicality. Relaxing to confidence`>=1` and lowering the point floor
-  to 15 recovered 9 of the 10 masks as real pieces, with no new false positives (all still passed the
-  size-plausibility check). Found by checking whether the pipeline was finding all the *real* objects it was
-  shown, not just whether the ones it did report were correct - see `results/README.md`. This affects every
-  frame, so it's likely also part of why spine separation on a real bookshelf (book spines are thin, exactly
-  the kind of small-footprint geometry this bug penalised) is unmeasured but suspect.
-- **`find_pieces` silently discarded furniture-scale objects.** The size-plausibility filters (`0.25` of
-  frame area, `0.6m` max 3D extent) were sized for books and never revisited when scope expanded to
-  library-insurance inventory (furniture, laptops, chargers - anything seen). Found by a user noticing SAM2
-  detecting "many things" in a frame but furniture never showing up as a piece: SAM2 was finding it fine,
-  `find_pieces` was throwing the candidate away afterward as "too big = wall/shelf." Now `piece_max_frame_frac`
-  (0.6) / `piece_max_dim_m` (3.0m) in `Config`, wide enough for a wardrobe or sofa; a real wall/floor/ceiling
-  mask (which spans meters in every direction) still gets rejected, and step 8's `is_object` judgment remains
-  the actual backstop either way. **Not yet re-run on real data** - only unit-tested with synthetic masks.
-- **`--regions` silently dropped whole rooms.** `run_demo.py` defaulted to processing only the first 3-4
-  regions found, with no indication more existed; on a 222-frame scan sampled every 16th frame, that meant
-  most of the room's segmented pieces never reached a model. Default is now 0 (process every region found);
-  the report also lists `regions_found` vs `regions_processed` and names any skipped regions.
+  *centers* fell inside frame, with no check on size or occlusion. Fixed by `regions.best_group_still`,
+  which requires most of each piece's projected box to be visible, not just its centre.
+- **Adjacency between pieces was under-signalled.** Added a `near (not overlapping)` hint (within 20cm) so
+  Fable/Astra can reason about real-world clutter that sits next to, not inside, its neighbour.
+- **`lift_mask` silently dropped most real objects, not just noise.** Required ARKit confidence `==2`
+  ("high" only) and >=30 points, which threw away correctly-segmented masks for small/distant/dark objects
+  on a depth-confidence technicality alone. Relaxing to confidence `>=1` and lowering the point floor to 15
+  recovered 9 of 10 previously-dropped real pieces in one test frame, no new false positives.
+- **`find_pieces` silently discarded furniture-scale objects.** The size-plausibility filters (0.25 of frame
+  area, 0.6m max 3D extent) were sized for books and never revisited when scope expanded to library-insurance
+  inventory (furniture, laptops, chargers). Now `piece_max_frame_frac` (0.6) / `piece_max_dim_m` (3.0m) in
+  `Config`. **Confirmed fixed on real data**: a real bed and wall-mounted TV, previously invisible to the
+  pipeline, now show up as detected, priced objects.
+- **`--regions` silently dropped whole rooms.** Default is now 0 (process every region found); the report
+  lists `regions_found` vs `regions_processed` and names any skipped regions.
+- **Frames/stills were saved sideways.** RoomCapture (this project's own app) keeps captured images in raw
+  sensor orientation regardless of how the phone was physically held. 3D reconstruction is unaffected
+  (ARKit world space is gravity-aligned Y-up regardless of buffer orientation), but every crop shown to a
+  vision model or a human reviewer was rotated 90°. Fixed with `pieces.rotate_cw`, applied only to final
+  crops (never to a full frame or a mask, to avoid touching the depth-aligned math in `find_pieces`) —
+  `--rotate` on `run_demo.py`, `Config.crop_rotate_deg` otherwise.
+- **The same physical wall was sometimes detected twice.** RANSAC line-fitting on noisy real depth data
+  occasionally split one wall into two near-parallel, near-coincident segments (confirmed: 15-17cm apart,
+  more than the original synthetic-noise tolerance assumed). Fixed by `floorplan.merge_duplicate_walls`.
+- **The production `libpipe process` path never got the trained spine detector.** It was wired into
+  `run_demo.py`'s `--spine` flag but `cli.py`'s `real_deps()` still built `Deps` with SAM2 alone - a real
+  upload processed via the actual production command would have silently skipped it. Fixed.
+- **`--resume` still re-paid for SAM2/spine-detector segmentation on every retry.** It already skipped
+  regions with stored objects, but recomputed step 6/7 geometry from scratch every time - itself a paid
+  Replicate call, for identical results, on the exact same frames. Now cached to the `--out` directory's
+  `pieces.json`/`regions.json` and reloaded on `--resume` instead of recomputed.
+- **HITL had no way to mark something "not a real object," or to remove a duplicate outright.** A reviewer
+  could edit book/price fields or dismiss an item as-is, but not correct a wall/floor fragment the models
+  missed, nor delete a confirmed duplicate detection (found for real: the same physical book, split across
+  two different regions by size-based chunking, got identified and priced twice). Both options now on the
+  HITL review page.
 
 ## Known gaps / deviations from the diagram
-- **Jev is text-only and returns no prose** (choice + probabilities + confidence). Step 9's "verdict + reasoning" is
-  therefore the probability distribution, and Jev judges from the two models' text answers + text evidence
-  (voice, notes, barcode, sizes), not from images. Early access / waitlist.
+- **Spine detector recall was never tuned against real data** - only against false positives on two
+  book-free rooms. Spot-checked against a real bookshelf photo for the first time: of 3 clearly visible
+  spines, it correctly boxed 1 (the other 2 *were* detected, just below the 0.6 confidence cutoff - likely
+  partial occlusion + motion blur, not a blind spot), and had one false positive on a power strip (its
+  repeated grid-of-holes pattern resembles the vertical-line texture learned for spines). Needs real-shelf
+  recall data to retune the threshold properly.
+- **Cross-region duplicate detection is manual only.** Two pieces of the same physical object can land in
+  different regions (make_regions' size-based chunking doesn't guarantee non-overlapping-but-adjacent
+  pieces stay together) and get identified/priced independently. A reviewer has to spot and remove the
+  duplicate by hand via HITL; there's no automatic cross-region judged-pair check.
+- **`--resume`/`--rotate`/`--spine`/`--every` are `run_demo.py`-only.** The production `libpipe process`
+  command doesn't expose any of them yet - always full SAM2+spine, no rotation correction, default
+  `every=5`, no resume support.
+- **Jev is text-only and returns no prose** (choice + probabilities + confidence). Jev judges from the two
+  models' text answers + text evidence (voice, notes, barcode, sizes), not from images.
 - Step 5 doors/windows: not implemented (needs ARKit mesh classification the app doesn't save).
-- Step 6 "unclaimed space" flagging: not implemented at all (needs a shelf-plane estimate). The `near` hint
-  added above helps models reason about clutter but is not the same thing.
-- Step 9 always runs the re-share round on a disagreement (literal reading of the diagram); this doubles cost per
-  dispute. Skipping it when Jev's first verdict is decisive is a one-line change in `settle_region`.
-- Keepa is optional/skipped by default (paid plan) - book pricing currently falls through to Google Shopping
-  search only, which returns retail prices, not necessarily the MRP/RRP the `price_concept` field claims.
-- Google Lens needs a public image URL, which this setup doesn't have; non-book pricing uses Astra web-search
-  on the crop directly instead (`WebSearchPricer`), which is close in spirit but not the same method the
-  diagram specifies.
+- Step 6 "unclaimed space" flagging: not implemented at all (needs a shelf-plane estimate).
+- Step 9 always runs the re-share round on a disagreement (literal reading of the diagram); doubles cost
+  per dispute.
+- Keepa is optional/paid - book pricing falls through to Google Shopping if not configured, which returns
+  retail prices, not necessarily the MRP/RRP the `price_concept` field claims.
+- Non-book pricing accuracy has no ground truth to check against - prices look plausible, nothing confirms
+  they're actually accurate.
 - Currency map covers ~20 countries; unknown countries default to USD.
-- Spine detection now has a trained detector (`pieces.SpineDetector`, YOLOv8n-OBB, see "Spine detector
-  fine-tuning" below) available alongside the original `split_by_spine_edges` heuristic - pass a list of
-  segmenters (e.g. `[ReplicateSAM2(), SpineDetector()]`, or `--spine` on `run_demo.py`) to use both. Still
-  **never run on a real bookshelf or any frame from this project's own capture pipeline** - only validated
-  on Roboflow's held-out split (see `results/README.md`) and a false-positive check on two book-free scans.
-- SAM2 via Replicate (`meta/sam-2`) now confirmed working end to end; the free `OpenCVSegmenter` fallback is
-  much cruder (over-segments walls/texture) and exists only for testing without Replicate credit.
+- The weekly gold-set drift check (`libpipe gold`, `learning.run_gold`) has never actually been run.
 
-## Spine detector fine-tuning
-Not started. Needs, from whoever owns the 132-image dataset: the export format (YOLO-OBB txt, COCO, VOC-XML,
-or a Roboflow export zip), whether boxes are axis-aligned or oriented, and the class list. Also needs a
-decision on where training runs (this machine's GPU, if any, vs. a cloud GPU/Ultralytics HUB/Roboflow's
-hosted training) - none of that is set up yet.
+## Spine detector fine-tune
+
+Trained: `yolov8n-obb`, 48 epochs, on Roboflow's "Book Spines" dataset (2,003 images, real oriented boxes).
+Training artifacts and metrics are in `runs/obb/runs_spine/nano48/` (weights, PR curves, confusion matrix).
+
+**On the training distribution's held-out split**: 96.2% precision, 93.9% recall, mAP50 97.8%, mAP50-95
+76.3% - see `results/README.md` for the full metrics and how they compare to the source paper.
+
+**On a real photo, outside the training distribution, for the first time**: see "Known gaps" above - 1 of
+3 real spines correctly boxed at the default threshold, the other 2 detected but under-confident, plus one
+false positive on unrelated clutter. Real-world generalization is now partially measured, not
+"completely unverified" as before, but still needs real-shelf recall data before the confidence threshold
+can be trusted.

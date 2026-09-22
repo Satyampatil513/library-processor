@@ -13,10 +13,12 @@ dependencies = [
   "anthropic",
   "openai",
   "zxing-cpp",
+  "ultralytics",       # SpineDetector (step 6)
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+r3d = ["pyliblzfse"]   # only needed to import Record3D .r3d scans (r3d.py); not a runtime dependency otherwise
 
 [project.scripts]
 libpipe = "libpipe.cli:main"
