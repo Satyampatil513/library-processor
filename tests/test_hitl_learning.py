@@ -92,6 +92,40 @@ def test_hitl_reprice_skipped_when_reviewer_gives_manual_price(tmp_path):
     assert row["list_price"] == 30.0
 
 
+def test_hitl_remove_object_deletes_row_and_closes_all_its_open_items(tmp_path):
+    """A duplicate detection (e.g. the same physical book found in two different regions, so they never
+    shared a region call and couldn't be merged there) needs to be gone entirely, not just marked
+    not_an_object - and any OTHER still-open HITL items on that same object (a real object can accumulate
+    more than one, e.g. both "unpriced" and "Jev tie") must close too, since the row they point at no
+    longer exists."""
+    db = DB(tmp_path / "t.db")
+    add_obj(db, "o1")
+    hitl.enqueue(db, "o1", "unpriced")
+    hitl.enqueue(db, "o1", "Jev tie / low confidence")
+    first_item = hitl.open_items(db)[0]
+
+    removed_id = hitl.remove_object(db, first_item["id"])
+
+    assert removed_id == "o1"
+    assert db.q("SELECT * FROM objects WHERE id='o1'") == []
+    assert hitl.open_items(db) == []
+    assert [r["status"] for r in db.q("SELECT status FROM hitl WHERE object_id='o1'")] == ["done", "done"]
+
+
+def test_hitl_remove_object_does_not_touch_other_objects(tmp_path):
+    db = DB(tmp_path / "t.db")
+    add_obj(db, "o1")
+    add_obj(db, "o2")
+    hitl.enqueue(db, "o1", "duplicate")
+    hitl.enqueue(db, "o2", "unpriced")
+    item = hitl.open_items(db)[0]
+
+    hitl.remove_object(db, item["id"])
+
+    assert db.q("SELECT id FROM objects WHERE id='o2'") != []
+    assert len(hitl.open_items(db)) == 1 and hitl.open_items(db)[0]["object_id"] == "o2"
+
+
 def test_hitl_can_mark_not_an_object(tmp_path):
     """Regression test: Astra/Fable can return is_object:false (bare wall/floor/shadow), but until now HITL
     had no way for a human reviewer to correct something the SAME way by hand."""

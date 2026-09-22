@@ -59,6 +59,7 @@ h1 { font-size: 20px; }
 .cand .field { font-size: 13px; margin: 2px 0; }
 button, input[type=submit] { cursor: pointer; border: none; border-radius: 6px; padding: 6px 14px; font-size: 13px; background: #2563eb; color: #fff; }
 button.secondary { background: #e5e7eb; color: #1c1c1f; }
+button.danger { background: #fff; color: #b91c1c; border: 1px solid #b91c1c; }
 .manual { margin-top: 10px; }
 .manual input, .manual textarea, .manual select { width: 100%; box-sizing: border-box; margin: 3px 0 8px; padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
 .manual label { font-size: 12px; color: #555; }
@@ -136,8 +137,12 @@ def _item_html(db: DB, item: dict) -> str:
           <button type="submit">Save correction</button>
         </form>
       </details>
-      <form method="post" action="/hitl/{item['id']}/resolve" style="margin-top:8px">
+      <form method="post" action="/hitl/{item['id']}/resolve" style="margin-top:8px; display:inline-block">
         <button type="submit" class="secondary">Dismiss (keep as-is, just close this item)</button>
+      </form>
+      <form method="post" action="/hitl/{item['id']}/remove" style="margin-top:8px; display:inline-block"
+            onsubmit="return confirm('Permanently remove this object? This deletes the row entirely - use this for duplicates, not for wall/floor fragments (use the manual form\'s \'not a real object\' option for those instead).')">
+        <button type="submit" class="danger">Remove object entirely (e.g. a duplicate)</button>
       </form>
     </div>"""
 
@@ -185,4 +190,11 @@ def hitl_resolve(item_id: int, pick: str | None = Form(None), title: str | None 
     isbndb, pricer = _get_pricing_deps()
     hitl.resolve(db, item_id, fix, isbndb=isbndb, pricer=pricer,
                 image_base_url=cfg.key("IMAGE_BASE_URL"), output_dir=cfg.output_dir)
+    return RedirectResponse("/hitl", status_code=303)
+
+
+@router.post("/hitl/{item_id}/remove")
+def hitl_remove(item_id: int):
+    db = DB(Config().db_path)
+    hitl.remove_object(db, item_id)
     return RedirectResponse("/hitl", status_code=303)

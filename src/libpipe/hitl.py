@@ -54,6 +54,21 @@ def _reprice(db: DB, object_id: str, isbndb, pricer, image_base_url: str | None,
                  ("estimate; " if pr.estimate else "") + (pr.fx_note or ""), object_id))
 
 
+def remove_object(db: DB, item_id: int) -> str:
+    """Permanently deletes the object a HITL item points at - for cases like a duplicate detection (the
+    same physical book found in two different regions, so it never shared a region call with itself and
+    couldn't be merged there) where the entry shouldn't exist as a separate line item at all. Different
+    from marking `not_an_object`, which keeps the row "for the record" - this is for a human saying the
+    row itself is wrong, not just unpriceable. Closes every other open HITL item for that same object too,
+    since a deleted object can't still have open questions. Returns the removed object_id."""
+    row = db.q("SELECT * FROM hitl WHERE id=?", (item_id,))[0]
+    object_id = row["object_id"]
+    db.x("DELETE FROM objects WHERE id=?", (object_id,))
+    db.x("UPDATE hitl SET status='done', resolution=? WHERE object_id=? AND status='open'",
+         (json.dumps({"removed": True}), object_id))
+    return object_id
+
+
 def resolve(db: DB, item_id: int, fix: dict, *, isbndb=None, pricer=None,
            image_base_url: str | None = None, output_dir: Path | None = None) -> None:
     """`fix` holds the corrected fields (title, author, is_book, is_old, isbn, list_price, ...) or

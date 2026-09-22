@@ -81,6 +81,15 @@ def test_manual_correction_can_mark_not_an_object(client):
     assert db.q("SELECT status FROM objects WHERE id='obj6'")[0]["status"] == "not_an_object"
 
 
+def test_remove_object_endpoint_deletes_it(client):
+    c, db, _ = client
+    item_id = seed(db, "obj7", "duplicate", {}, title="Trillion Dollar Coach")
+    r = c.post(f"/hitl/{item_id}/remove", follow_redirects=False)
+    assert r.status_code == 303
+    assert db.q("SELECT id FROM objects WHERE id='obj7'") == []
+    assert db.q("SELECT * FROM hitl WHERE status='open'") == []
+
+
 def test_dismiss_with_no_fields_just_closes_item(client):
     c, db, _ = client
     item_id = seed(db, "obj4", "sample flagged by Jev", {}, title="Untouched")
