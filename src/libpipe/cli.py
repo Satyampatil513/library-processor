@@ -11,7 +11,7 @@ from .config import Config
 def real_deps():
     from .identity import ISBNdb
     from .llm import Astra, Fable, JevJudge, transcribe
-    from .pieces import ReplicateSAM2
+    from .pieces import ReplicateSAM2, SpineDetector
     from .pipeline import Deps
     from .pricing import Pricer, WebSearchPricer
 
@@ -19,7 +19,11 @@ def real_deps():
     from pathlib import Path
     reg = os.environ.get("ASSET_REGISTER")
     pricer = Pricer(asset_register=Path(reg) if reg else None, web=WebSearchPricer())
-    return Deps(Fable(), Astra(), JevJudge(), ReplicateSAM2(), transcribe, ISBNdb(), pricer)
+    # step 6 per the diagram: "SAM2 + spine-boundary detector", not SAM2 alone - this was missing here even
+    # after the trained detector was wired into run_demo.py, so a real `libpipe process` on a real app upload
+    # would have silently skipped it and fallen back to split_by_spine_edges for every mask, book or not.
+    segmenter = [ReplicateSAM2(), SpineDetector()]
+    return Deps(Fable(), Astra(), JevJudge(), segmenter, transcribe, ISBNdb(), pricer)
 
 
 def main(argv=None):
