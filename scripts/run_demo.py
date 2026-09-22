@@ -36,9 +36,15 @@ ap.add_argument("--whisper", action="store_true", help="transcribe the session a
 ap.add_argument("--resume", action="store_true",
                 help="skip regions that already have objects stored in the DB for this session (e.g. after an "
                      "interrupted run) instead of re-paying for their Fable/Astra/Jev calls")
+ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
+                help="clockwise degrees to correct crops shown to Fable/Astra and saved for review - some "
+                     "capture rigs (confirmed: this project's own RoomCapture app) save frames sideways "
+                     "relative to gravity; does not affect 3D box positions/sizes, which are unaffected "
+                     "(see pieces.rotate_cw)")
 a = ap.parse_args()
 
 cfg = Config().ensure()
+cfg.crop_rotate_deg = a.rotate
 db = DB(cfg.db_path)
 name = Path(a.session_dir).name
 rec = Recorder(a.out or f"results/{name}")

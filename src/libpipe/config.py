@@ -45,6 +45,11 @@ class Config:
     # see pieces.find_pieces docstring for why they were raised from an earlier book-only default
     piece_max_frame_frac: float = 0.6
     piece_max_dim_m: float = 3.0
+    # clockwise degrees (0/90/180/270) to correct crops shown to vision models / saved for review - some
+    # capture rigs save frames in raw sensor orientation regardless of how the phone was physically held;
+    # see pieces.rotate_cw's docstring. Per-session, not a fixed pipeline constant - set before calling
+    # process_session for a session known to need it (e.g. via run_demo.py's --rotate).
+    crop_rotate_deg: int = 0
     # step 7 regions
     region_size: int = 15
     # step 9 settle

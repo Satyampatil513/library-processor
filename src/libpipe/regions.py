@@ -150,7 +150,7 @@ def overview_image(s: Session, region: Region) -> Image.Image | None:
     return img
 
 
-def build_inputs(db: DB, s: Session, region: Region, exemplars: list[dict]) -> tuple[str, list[bytes]]:
+def build_inputs(db: DB, s: Session, region: Region, exemplars: list[dict], crop_rotate_deg: int = 0) -> tuple[str, list[bytes]]:
     images: list[bytes] = []
     lines = [f"REGION {region.id}: {len(region.pieces)} pieces, listed in shelf order.", ""]
     ov = overview_image(s, region)
@@ -159,7 +159,7 @@ def build_inputs(db: DB, s: Session, region: Region, exemplars: list[dict]) -> t
         lines.append("Image 1 = overview of the region with piece ids drawn in red.")
     near_radius = 0.20   # metres; a real-world proximity hint distinct from the rare true-3D-box-overlap flag
     for p in region.pieces:
-        crops = crop_for_piece(s, p, 2)
+        crops = crop_for_piece(s, p, 2, rotate_deg=crop_rotate_deg)
         first = len(images) + 1
         for c in crops:
             images.append(_jpeg(c, 800))

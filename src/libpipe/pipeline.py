@@ -43,7 +43,7 @@ def _union_piece(pieces: list[Piece]) -> Piece:
 
 
 def run_region(cfg: Config, db: DB, s: Session, region: Region, deps: Deps, rng: random.Random, rec: Recorder | None = None):
-    prompt, images = build_inputs(db, s, region, learning.exemplars(db))
+    prompt, images = build_inputs(db, s, region, learning.exemplars(db), crop_rotate_deg=cfg.crop_rotate_deg)
     if rec:
         rec.text(f"regions/{region.id}/prompt.txt", prompt)
         for i, im in enumerate(images):
@@ -79,7 +79,7 @@ def _store_object(cfg: Config, db: DB, s: Session, region: Region, o: dict, stat
     oid = f"{s.id}-{o['piece_ids'][0]}"
     crops = []
     (cfg.output_dir / "crops").mkdir(parents=True, exist_ok=True)
-    for k, c in enumerate(crop_for_piece(s, u, 2)):
+    for k, c in enumerate(crop_for_piece(s, u, 2, rotate_deg=cfg.crop_rotate_deg)):
         rel = f"crops/{oid}_{k}.jpg"
         c.save(cfg.output_dir / rel, quality=90)
         crops.append(rel)

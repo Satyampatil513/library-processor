@@ -349,6 +349,53 @@ def test_pending_regions_skips_already_priced_ones():
     assert [r.id for r in pending] == ["r003", "r004"]
 
 
+def test_rotate_cw_exact_pixel_mapping():
+    """Regression test: RoomCapture (this project's own app - see CaptureSession.swift) saves frames/stills
+    in raw sensor orientation regardless of how the phone was physically held, confirmed by a real upload
+    where a still's content was visibly sideways (a window lying on its side). `rotate_cw` corrects crops
+    shown to vision models / saved for review without touching any depth/mask math. Verified empirically:
+    a 90 correction (PIL ROTATE_270 under the hood) made the real photo upright."""
+    from libpipe.pieces import rotate_cw
+
+    img = Image.new("RGB", (4, 2))   # 4 wide, 2 tall; mark the top-left pixel to track orientation
+    img.putpixel((0, 0), (255, 0, 0))
+
+    assert rotate_cw(img, 0) is img   # no-op returns the same object, no needless re-encode
+
+    r90 = rotate_cw(img, 90)
+    assert r90.size == (2, 4)                          # dimensions swap on a 90/270 rotation
+    assert r90.getpixel((1, 0)) == (255, 0, 0)          # top-left corner moves to top-right after a CW turn
+
+    r180 = rotate_cw(img, 180)
+    assert r180.size == (4, 2)
+    assert r180.getpixel((3, 1)) == (255, 0, 0)         # top-left moves to bottom-right
+
+    r270 = rotate_cw(img, 270)
+    assert r270.size == (2, 4)
+    assert r270.getpixel((0, 3)) == (255, 0, 0)         # top-left moves to bottom-left after a CCW-equivalent turn
+
+
+def test_crop_for_piece_applies_rotation(monkeypatch):
+    from libpipe.pieces import Piece, crop_for_piece
+
+    I3 = [[600, 0, 320], [0, 600, 240], [0, 0, 1]]
+    T = np.eye(4).tolist()
+    still_data = {"transform": T, "intrinsics": I3, "width": 640, "height": 480}
+    img = Image.new("RGB", (640, 480), (10, 20, 30))
+
+    class FakeSession:
+        stills = [still_data]
+
+        def still(self, st):
+            return img
+
+    p = Piece("p0", np.array([-0.3, -0.3, -1.15]), np.array([0.3, 0.3, -0.85]), 100)
+
+    plain = crop_for_piece(FakeSession(), p, max_crops=1)
+    rotated = crop_for_piece(FakeSession(), p, max_crops=1, rotate_deg=90)
+    assert rotated[0].size == (plain[0].height, plain[0].width)
+
+
 def test_pending_regions_is_a_noop_when_nothing_is_done():
     from libpipe.pipeline import _pending_regions
     from libpipe.regions import Region

@@ -344,8 +344,27 @@ def decode_barcodes(s: Session, pieces: list[Piece]) -> None:
                 best.barcode = bc.text
 
 
-def crop_for_piece(s: Session, p: Piece, max_crops: int = 2, pad: float = 0.15) -> list[Image.Image]:
-    """Crops from the hi-res stills where the piece is best framed (different angles = spread of camera positions)."""
+_CW_TRANSPOSE = {90: Image.Transpose.ROTATE_270, 180: Image.Transpose.ROTATE_180, 270: Image.Transpose.ROTATE_90}
+
+
+def rotate_cw(img: Image.Image, deg: int) -> Image.Image:
+    """Rotates `img` `deg` degrees clockwise (0/90/180/270 only - exact, no interpolation blur).
+
+    Some capture rigs (confirmed: this project's own RoomCapture app - see CaptureSession.swift, which
+    deliberately keeps frames/stills in raw sensor orientation and never rotates to match how the phone was
+    physically held) save images sideways relative to gravity, even though the 3D reconstruction itself is
+    unaffected (ARKit world space is always gravity-aligned Y-up regardless of buffer orientation - box
+    positions/sizes/floor plan are correct either way). What DOES suffer is anything that looks at the pixels:
+    a vision model reading a title/author, or a human reviewing a crop. This is applied only to the final,
+    already-cropped image - never to a full frame or a mask - specifically to avoid touching the
+    depth/confidence-aligned math in `find_pieces`/`lift_mask`, which must keep operating in the raw
+    orientation the intrinsics were calibrated for."""
+    return img.transpose(_CW_TRANSPOSE[deg]) if deg else img
+
+
+def crop_for_piece(s: Session, p: Piece, max_crops: int = 2, pad: float = 0.15, rotate_deg: int = 0) -> list[Image.Image]:
+    """Crops from the hi-res stills where the piece is best framed (different angles = spread of camera positions).
+    `rotate_deg`: clockwise correction applied to each returned crop (see `rotate_cw`); 0 = no change."""
     from .session import mat4
 
     scored = []
@@ -373,5 +392,6 @@ def crop_for_piece(s: Session, p: Piece, max_crops: int = 2, pad: float = 0.15) 
     out = []
     for _, st, box, _pos in chosen:
         img = s.still(st)
-        out.append(img.crop((max(0, int(box[0])), max(0, int(box[1])), min(img.width, int(box[2])), min(img.height, int(box[3])))))
+        crop = img.crop((max(0, int(box[0])), max(0, int(box[1])), min(img.width, int(box[2])), min(img.height, int(box[3]))))
+        out.append(rotate_cw(crop, rotate_deg))
     return out
