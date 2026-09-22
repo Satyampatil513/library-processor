@@ -122,6 +122,25 @@ def _store_object(cfg: Config, db: DB, s: Session, region: Region, o: dict, stat
     db.upsert("objects", row)
 
 
+def _load_cached_geometry(rec: Recorder) -> tuple[list[Piece], list[Region]] | None:
+    """If a prior (interrupted) attempt already wrote pieces.json/regions.json to this Recorder's output
+    dir, load them instead of recomputing step 6/7. `--resume` previously only skipped already-priced
+    *regions* (the Fable/Astra/Jev calls) - it still re-ran SAM2 + the spine detector on every attempt,
+    which is itself a paid Replicate call, on the exact same frames, for no benefit (steps 6/7 are
+    deterministic given the same segmenter/frames/config, so recomputing them just re-pays for identical
+    results). None if no cached geometry exists yet, so the caller falls back to computing it fresh."""
+    pieces_path, regions_path = rec.path("pieces", "pieces.json"), rec.path("regions", "regions.json")
+    if not (pieces_path.exists() and regions_path.exists()):
+        return None
+    by_id: dict[str, Piece] = {}
+    for r in json.loads(pieces_path.read_text()):
+        by_id[r["id"]] = Piece(r["id"], np.array(r["min"]), np.array(r["max"]), 0, r["frames"],
+                               r.get("barcode"), r.get("overlaps") or [])
+    regions = [Region(rid, [by_id[pid] for pid in pids if pid in by_id])
+              for rid, pids in json.loads(regions_path.read_text()).items()]
+    return list(by_id.values()), regions
+
+
 def _pending_regions(regions: list[Region], done_ids: set[str]) -> list[Region]:
     """Regions not yet in `done_ids` (already-priced regions from a prior, interrupted run of the same
     session) - keeps `process_session(resume=True)` from re-paying for Fable/Astra/Jev calls a killed run
@@ -163,23 +182,28 @@ def process_session(cfg: Config, db: DB, session_dir: Path, deps: Deps, seed: in
         if rec and masks:
             rec.image(f"segmentation/frame_{fr['index']:06d}.jpg", mask_overlay(img, masks))
 
-    pieces = find_pieces(s, deps.segmenter, every=every, merge_iou=cfg.merge_iou, on_frame=on_frame,
-                        max_frame_frac=cfg.piece_max_frame_frac, max_dim_m=cfg.piece_max_dim_m)   # 6
-    decode_barcodes(s, pieces)
-    all_regions = make_regions(pieces, cfg.region_size)                         # 7
+    cached = _load_cached_geometry(rec) if (resume and rec) else None
+    if cached:
+        pieces, all_regions = cached
+    else:
+        pieces = find_pieces(s, deps.segmenter, every=every, merge_iou=cfg.merge_iou, on_frame=on_frame,
+                            max_frame_frac=cfg.piece_max_frame_frac, max_dim_m=cfg.piece_max_dim_m)   # 6
+        decode_barcodes(s, pieces)
+        all_regions = make_regions(pieces, cfg.region_size)                     # 7
+        if rec:
+            rec.json("pieces/pieces.json", [{"id": p.id, "min": p.box_min.tolist(), "max": p.box_max.tolist(),
+                                             "size_cm": (p.size * 100).round(1).tolist(), "frames": p.frames,
+                                             "barcode": p.barcode, "overlaps": p.overlaps} for p in pieces])
+            rec.json("regions/regions.json", {r.id: r.piece_ids for r in all_regions})
+            for r in all_regions:   # 3D boxes projected on the still that actually shows the region well (see best_group_still)
+                best = best_group_still(s, r.pieces)
+                if best:
+                    rec.image(f"pieces/{r.id}_boxes.jpg", draw_piece_boxes(s.still(best), best, r.pieces))
     regions = all_regions[:max_regions] if max_regions else all_regions
-    if rec:
-        rec.json("pieces/pieces.json", [{"id": p.id, "min": p.box_min.tolist(), "max": p.box_max.tolist(),
-                                         "size_cm": (p.size * 100).round(1).tolist(), "frames": p.frames,
-                                         "barcode": p.barcode, "overlaps": p.overlaps} for p in pieces])
-        rec.json("regions/regions.json", {r.id: r.piece_ids for r in all_regions})
-        for r in all_regions:   # 3D boxes projected on the still that actually shows the region well (see best_group_still)
-            best = best_group_still(s, r.pieces)
-            if best:
-                rec.image(f"pieces/{r.id}_boxes.jpg", draw_piece_boxes(s.still(best), best, r.pieces))
     by_id = {p.id: p for p in pieces}
     report["steps"]["pieces"] = {"pieces": len(pieces), "regions_found": len(all_regions),
-                                 "regions_processed": len(regions), "barcodes": sum(bool(p.barcode) for p in pieces)}
+                                 "regions_processed": len(regions), "barcodes": sum(bool(p.barcode) for p in pieces),
+                                 "geometry_cached": bool(cached)}
     if len(regions) < len(all_regions):
         report["steps"]["pieces"]["skipped_regions"] = [r.id for r in all_regions[len(regions):]]
 

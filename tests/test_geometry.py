@@ -396,6 +396,41 @@ def test_crop_for_piece_applies_rotation(monkeypatch):
     assert rotated[0].size == (plain[0].height, plain[0].width)
 
 
+def test_load_cached_geometry_reconstructs_pieces_and_regions(tmp_path):
+    """Regression test: --resume previously only skipped already-priced *regions*, but still re-ran the
+    paid SAM2/spine-detector segmentation (step 6) from scratch on every attempt, since nothing cached its
+    output - found when a real session needed several resumes in a row and kept re-paying Replicate for
+    identical geometry each time."""
+    from libpipe.artifacts import Recorder
+    from libpipe.pipeline import _load_cached_geometry
+
+    rec = Recorder(tmp_path / "out")
+    rec.json("pieces/pieces.json", [
+        {"id": "p0000", "min": [0, 0, 0], "max": [0.1, 0.2, 0.1], "size_cm": [20, 10, 10],
+         "frames": [0, 1], "barcode": "9780000000000", "overlaps": ["p0001"]},
+        {"id": "p0001", "min": [0.1, 0, 0], "max": [0.2, 0.2, 0.1], "size_cm": [10, 20, 10],
+         "frames": [2], "barcode": None, "overlaps": ["p0000"]},
+    ])
+    rec.json("regions/regions.json", {"r000": ["p0000", "p0001"]})
+
+    cached = _load_cached_geometry(rec)
+    assert cached is not None
+    pieces, regions = cached
+    by_id = {p.id: p for p in pieces}
+    assert set(by_id) == {"p0000", "p0001"}
+    assert by_id["p0000"].barcode == "9780000000000" and by_id["p0000"].overlaps == ["p0001"]
+    assert np.allclose(by_id["p0000"].box_max, [0.1, 0.2, 0.1])
+    assert len(regions) == 1 and regions[0].id == "r000"
+    assert [p.id for p in regions[0].pieces] == ["p0000", "p0001"]
+
+
+def test_load_cached_geometry_returns_none_when_nothing_cached_yet(tmp_path):
+    from libpipe.artifacts import Recorder
+    from libpipe.pipeline import _load_cached_geometry
+
+    assert _load_cached_geometry(Recorder(tmp_path / "out")) is None
+
+
 def test_pending_regions_is_a_noop_when_nothing_is_done():
     from libpipe.pipeline import _pending_regions
     from libpipe.regions import Region
