@@ -1,0 +1,33 @@
+[project]
+name = "libpipe"
+version = "0.1.0"
+description = "Server pipeline for RoomCapture sessions: scene graph of books/objects with identity and price"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "scipy",
+  "pillow",
+  "httpx",
+  "fastapi",
+  "uvicorn",
+  "anthropic",
+  "openai",
+  "zxing-cpp",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+libpipe = "libpipe.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

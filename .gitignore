@@ -1,0 +1,27 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# virtual envs
+.venv/
+.venv-train/
+
+# real capture data: contains real photos from real room scans, kept local only
+data/
+
+# demo/showcase run outputs: contains real photos/crops, kept local only - written findings survive in README
+results/*
+!results/README.md
+
+# pretrained base checkpoints (not project output - re-downloadable from Ultralytics, and yolov8x-obb.pt
+# exceeds GitHub's 100MB per-file limit anyway); the actually-trained spine detector lives in runs/ and IS tracked
+/yolov8n-obb.pt
+/yolov8x-obb.pt
+
+# logs
+*.log
